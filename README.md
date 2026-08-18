@@ -1,186 +1,252 @@
-# Financial Statement Extraction POC
+# Financial Statement Extraction Agent
 
-Reads bank-statement images out of a Gmail inbox and turns them into structured JSON
-using Gemini, following the rules in `prompt.txt` (sender whitelist, supported banks,
-never-guess policy, confidence scoring, etc.).
+> **Status:** Proof of Concept — not production-ready. See [Limitations](#limitations).
 
-**This version never touches Google Cloud Console, and calls Gemini over
-plain HTTPS instead of Google's SDK.** Email is read over IMAP with a Gmail
-App Password (a native Gmail feature, not a workaround), and `gemini_client.py`
-uses only Python's built-in `urllib` — no `google-genai` package. That matters
-if you're on a locked-down Windows machine: the SDK pulls in `google-auth`,
-which pulls in `cryptography`, which ships a compiled Rust binary that
-Application Control / WDAC policies on managed machines often block outright.
-This project has zero third-party packages that ship compiled binaries.
+Reads bank-statement images out of a Gmail inbox and turns them into structured,
+schema-validated JSON using Gemini — sender whitelisting, per-bank association,
+confidence scoring, and a strict never-guess policy, all defined in [`prompt.txt`](prompt.txt).
+
+Built to run at **zero cost**: no Google Cloud Console project, no billing account,
+no SDK with compiled native dependencies. Just an IMAP login and a Gemini API key.
 
 ---
 
-## Project layout
+## Contents
+
+- [How it works](#how-it-works)
+- [Why it's built this way](#why-its-built-this-way)
+- [Setup](#setup)
+- [Configuration](#configuration)
+- [Running it](#running-it)
+- [Sample test data](#sample-test-data)
+- [Testing checklist](#testing-checklist)
+- [Project structure](#project-structure)
+- [Troubleshooting](#troubleshooting)
+- [Limitations](#limitations)
+- [Security & data handling](#security--data-handling)
+
+---
+
+## How it works
 
 ```
-statement-poc/
-├── README.md
-├── requirements.txt
-├── .env.example         <- copy to .env and fill in your values
-├── .gitignore
-├── prompt.txt             <- the system prompt sent to Gemini (your rules/schema)
-├── imap_client.py          <- connects to Gmail over IMAP with an App Password
-├── email_utils.py           <- sender check, body text + image extraction
-├── gemini_client.py          <- calls Gemini over plain HTTPS (stdlib only, no SDK)
-├── main.py                    <- orchestrates the whole pipeline, run this
-└── output/                     <- one JSON file per processed email lands here
+Gmail inbox
+      │  IMAP (App Password, read-only) — no Google Cloud project involved
+      ▼
+imap_client.py    connect, search by sender, fetch full message
+      │
+      ▼
+email_utils.py    exact sender check; walk the MIME tree for body text + images
+      │
+      ▼
+gemini_client.py  build the request (prompt.txt + sender/date/body + images),
+      │           POST to Gemini over plain urllib — tries a list of model IDs
+      │           until one works, retries on rate limits
+      ▼
+main.py           orchestrates all of the above, writes results to disk
+      ▼
+output/<message-id>.json
 ```
 
----
-
-## ⚠️ Two things to know before you start
-
-1. **Free Gemini tier + real data don't mix.** Google may use free-tier prompts/files
-   to improve their models. Use your own test emails with fake/sample statement
-   images while this is on the free tier — not real customer documents.
-
-2. **Don't enable billing on your Gemini project "just to be safe."** As of 2026,
-   turning on billing removes the free tier entirely for that project — every
-   call becomes billable from the first token, even ones that would've fit
-   inside the free quota. If AI Studio ever shows a "Set up billing" prompt,
-   skip it unless you've deliberately decided to pay.
+For each email: verify the sender is on the allow-list, pull out the body text
+and every image attachment, hand it all to Gemini alongside the system prompt,
+and save whatever comes back as JSON. Nothing more.
 
 ---
 
-## Prerequisites
+## Why it's built this way
 
-- Python 3.10+
-- A Gmail account
-- 5 minutes for one-time setup below
+A few choices here aren't the "default" way to do this, each for a concrete reason:
 
-No Google Cloud project, no card, no admin approval needed.
+- **IMAP + App Password instead of the Gmail API.** The Gmail API route requires
+  a Google Cloud Console project, which started demanding a linked billing
+  account before letting new projects proceed. IMAP needs none of that.
+- **Raw HTTPS (`urllib`) instead of the `google-genai` SDK.** The SDK pulls in
+  `google-auth` → `cryptography`, which ships a compiled Rust binary. On
+  locked-down Windows machines, Application Control / WDAC policies can block
+  that binary outright. This project has zero third-party packages with
+  compiled extensions in its core dependency chain.
+- **A model candidate list instead of one hardcoded model name.** Google
+  retires Gemini model IDs on a schedule this project can't keep up with by
+  hand — it's already hit two dead model names in testing. `gemini_client.py`
+  tries a short list in order and remembers whichever one actually works for
+  your key, so this failure mode is self-healing instead of a manual fix
+  every time.
+
+Full decision-by-decision history (what was tried, what broke, what replaced
+it) is in [`PROJECT_OVERVIEW.md`](PROJECT_OVERVIEW.md) if you want the whole story.
 
 ---
 
 ## Setup
 
-### 1. Install dependencies
+**Prerequisites:** Python 3.10+, a Gmail account. Nothing else — no admin
+approval, no card, no Cloud project.
 
 ```bash
+git clone <this-repo>
 cd statement-poc
 python -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Turn on 2-Step Verification (if not already on)
+**1. Turn on 2-Step Verification** on the Gmail account you're using:
+`myaccount.google.com` → Security → 2-Step Verification. Required before
+Google will issue App Passwords.
 
-Go to **myaccount.google.com → Security → 2-Step Verification** and turn it on.
-This is required before Google will let you generate an App Password.
+**2. Generate a Gmail App Password:** `myaccount.google.com/apppasswords` →
+name it anything → copy the 16-character password shown (it's shown once).
+This is scoped to mail access only, not your real password, and revocable
+any time from the same page.
 
-### 3. Generate a Gmail App Password
+**3. Get a free Gemini API key:** `aistudio.google.com` → Get API key →
+Create API key. No card required for the free tier. *(If AI Studio ever
+offers to "set up billing," don't — that removes the free tier entirely for
+that project.)*
 
-1. Go to **myaccount.google.com/apppasswords**.
-2. App name: anything, e.g. `statement-poc`.
-3. Google shows you a 16-character password — copy it now, it won't be shown again.
-
-This password is scoped to IMAP/mail access only — it's not your real Gmail password,
-and you can revoke it any time from the same page.
-
-### 4. Get a Gemini API key
-
-1. Go to **aistudio.google.com** → sign in → **Get API key** → **Create API key**.
-2. No credit card needed for the free tier.
-
-### 5. Configure environment
+**4. Configure environment:**
 
 ```bash
 cp .env.example .env
 ```
 
-Fill in `.env`:
-```
-GMAIL_ADDRESS=you@gmail.com
-GMAIL_APP_PASSWORD=the16charpassword
-ALLOWED_SENDER_EMAIL=sender@gmail.com
-GEMINI_API_KEY=your-gemini-key
-```
-
-`ALLOWED_SENDER_EMAIL` is the one address this agent will accept emails from —
-an exact match, not a domain. Everything else gets skipped as `UNAUTHORIZED_SENDER`.
-It can be the same as `GMAIL_ADDRESS` (you emailing test statements to yourself)
-or a different address entirely — whichever you're actually sending test emails from.
-
-### 6. Add test emails
-
-Send 2–3 emails **from exactly the address in `ALLOWED_SENDER_EMAIL`** to the
-inbox in `GMAIL_ADDRESS`. Each email should have 1+ statement-style images,
-ideally with a bank name written near each image.
+Fill in the four values — see [Configuration](#configuration) below.
 
 ---
 
-## Run it
+## Configuration
+
+All config lives in `.env` (copy from `.env.example`, never commit the real file):
+
+| Variable | Description |
+|---|---|
+| `GMAIL_ADDRESS` | The Gmail inbox to read from |
+| `GMAIL_APP_PASSWORD` | 16-character App Password (not your real Gmail password) |
+| `ALLOWED_SENDER_EMAIL` | The *only* address this agent accepts emails from — exact match, not a domain. Anything else is skipped as `UNAUTHORIZED_SENDER` before any Gemini call is made |
+| `GEMINI_API_KEY` | Free-tier key from Google AI Studio |
+
+---
+
+## Running it
 
 ```bash
 python main.py
 ```
 
-No browser popup, no login flow — it connects straight over IMAP using the
-App Password from `.env`.
+No browser popup, no login flow — connects straight over IMAP. Output lands
+as one JSON file per processed email in `output/`, named by message ID.
+Console output shows what was processed and what was skipped, and why.
 
-Output: one JSON file per processed email in `output/`. Console output shows
-what was skipped and why.
+---
+
+## Sample test data
+
+`sample_data/` has three ready-to-use synthetic bank statement images
+(Maybank, UOB, AmBank) — fully fictional data, watermarked "SAMPLE / TEST DATA."
+`ambank_sample_degraded.png` has a deliberately blurred field, for testing
+the null-on-unreadable-field behavior.
+
+Send yourself one email from `ALLOWED_SENDER_EMAIL`, attach all three, and
+put the bank name as a heading before each image in the body — matching the
+pattern `prompt.txt` expects:
+
+```
+Maybank
+[attach maybank_sample.png]
+
+UOB
+[attach uob_sample.png]
+
+AmBank
+[attach ambank_sample_degraded.png]
+```
+
+Want different data? `scripts/generate_sample_statements.py` regenerates
+these (or new variants — edit the calls at the bottom of the file). It needs
+Pillow (`pip install -r requirements-dev.txt`), which is **not** part of the
+core pipeline's dependencies for the same compiled-binary reason described
+above — if that install also gets blocked on your machine, just use the
+images already provided.
 
 ---
 
 ## Testing checklist
 
-Don't consider this "done" until you've verified all four:
+1. **Unauthorized sender** — an email not from `ALLOWED_SENDER_EMAIL` is
+   skipped, no Gemini call made.
+2. **Multi-bank association** — one email, multiple images under different
+   bank headings, produces separate `statements` entries with the right
+   bank each.
+3. **Nulls on unreadable fields** — a degraded image returns `null` for that
+   field rather than a guess.
+4. **Date validation** — matching vs. mismatched email/statement dates
+   return `MATCH` / `DATE_MISMATCH` correctly.
 
-1. **Unauthorized sender** → an email not from `ALLOWED_SENDER_EMAIL` is skipped, no Gemini call made.
-2. **Correct bank association** → an email with two statement images under two different
-   bank headings produces two separate `statements` entries with the right bank each.
-3. **Nulls on unreadable fields** → a deliberately blurry/cropped test image returns
-   `null` rather than a guessed value.
-4. **Date validation** → matching vs. mismatched email/statement dates correctly
-   return `MATCH` / `DATE_MISMATCH`.
+---
+
+## Project structure
+
+```
+statement-poc/
+├── README.md
+├── PROJECT_OVERVIEW.md          full build history and design rationale
+├── requirements.txt               core deps: python-dotenv, beautifulsoup4
+├── requirements-dev.txt            optional: Pillow, for the sample-data generator only
+├── .env.example
+├── .gitignore
+├── prompt.txt                       the system prompt sent to Gemini, verbatim
+├── imap_client.py                    Gmail IMAP connection
+├── email_utils.py                     sender check, body/image extraction
+├── gemini_client.py                    Gemini calls over plain HTTPS, model fallback, retry
+├── main.py                              entry point — run this
+├── scripts/
+│   └── generate_sample_statements.py     synthetic test-data generator
+├── sample_data/                            ready-to-use test images
+└── output/                                  extraction results land here
+```
 
 ---
 
 ## Troubleshooting
 
-- **`imaplib.IMAP4.error: b'[AUTHENTICATIONFAILED] Invalid credentials'`** →
-  you're using your normal Gmail password instead of the App Password, or
-  2-Step Verification isn't actually turned on yet.
-- **`GMAIL_ADDRESS and GMAIL_APP_PASSWORD must be set`** → `.env` wasn't created
-  from `.env.example`, or the values weren't filled in.
-- **`KeyError: 'GEMINI_API_KEY'`** / **`ALLOWED_SENDER_EMAIL is not set`** →
-  `.env` is missing that value — check it was copied from `.env.example` and filled in.
-- **Everything gets skipped as "unauthorized sender"** → `ALLOWED_SENDER_EMAIL` must
-  match the test email's From address *exactly* (case doesn't matter, but the address
-  does) — no display-name matching, no domain matching.
-- **App Password option missing from your Google Account** → this happens on
-  Workspace (school/work) accounts where an admin has disabled it, or if
-  Advanced Protection is enabled on the account. Use a personal @gmail.com
-  account for this POC if that's the case.
-- **Model returns non-JSON / truncated JSON** → check you're not hitting the
-  free-tier rate limit (live limits shown at aistudio.google.com); the script
-  prints the raw response so you can see what came back.
-- **`ImportError: DLL load failed ... Application Control policy has blocked
-  this file`** → this was the old `google-genai` SDK's `cryptography`
-  dependency getting blocked by Windows Application Control on a managed
-  machine. This version doesn't use that SDK at all (see `gemini_client.py`),
-  so if you still see this, run `pip list` and check `google-genai` isn't
-  installed in this venv from an earlier attempt — if it is, `pip uninstall
-  google-genai google-auth cryptography` and reinstall from `requirements.txt`.
-- **`Gemini API returned 404: ...`** → the model name in `gemini_client.py`
-  (`MODEL = "..."`) has been retired or renamed. Check aistudio.google.com
-  for the current free-tier model name and update that one line.
-- **No emails found** → confirm the test emails are in the Inbox (not archived/spam)
-  and the sender address actually contains the domain you're filtering on.
+| Symptom | Cause / fix |
+|---|---|
+| `[AUTHENTICATIONFAILED] Invalid credentials` | Using your real Gmail password instead of the App Password, or 2-Step Verification isn't on yet |
+| `GMAIL_ADDRESS and GMAIL_APP_PASSWORD must be set` | `.env` wasn't created from `.env.example`, or values weren't filled in |
+| `ALLOWED_SENDER_EMAIL is not set` / `KeyError: 'GEMINI_API_KEY'` | Same as above, for those specific values |
+| Everything skipped as "unauthorized sender" | `ALLOWED_SENDER_EMAIL` must match the test email's From address *exactly* — no display-name or domain matching |
+| App Password option missing from your Google Account | Happens on Workspace (school/work) accounts where an admin disabled it, or with Advanced Protection enabled — use a personal `@gmail.com` account |
+| `Gemini API returned 404` for every candidate | All models in `MODEL_CANDIDATES` (`gemini_client.py`) are dead. Check what your key currently supports at `https://generativelanguage.googleapis.com/v1beta/models?key=YOUR_KEY` and add the current name to the list |
+| Model returns non-JSON / truncated JSON | Possible free-tier rate limit — the script retries on 429 automatically, but check live limits at aistudio.google.com if it keeps happening |
+| `ImportError: DLL load failed ... Application Control policy has blocked this file` | Leftover `google-genai`/`cryptography` install from an earlier attempt — this version doesn't import that SDK at all. Run `pip uninstall google-genai google-auth cryptography` and reinstall from `requirements.txt` |
+| No emails found | Confirm test emails are in the Inbox (not archived/spam) and actually sent from `ALLOWED_SENDER_EMAIL` |
 
 ---
 
-## What's intentionally out of scope for this POC
+## Limitations
 
-- Continuous monitoring (this fetches on-demand when you run the script; real-time
-  would need Gmail push notifications, which does require Google Cloud)
-- Production-grade credential storage (`.env` on disk is fine for a POC, not for production)
-- Retry/backoff on Gemini rate limits
-- Database storage (currently just local JSON files)
-- A human review step before any downstream use of extracted numbers
+Intentionally out of scope for a POC:
+
+- **On-demand only** — fetches when you run it manually; real-time monitoring
+  would need Gmail push notifications, which *does* require Google Cloud
+  (unlike everything else here).
+- **Local secrets** — `.env` on disk is fine for a POC, not production.
+- **No database** — output is local JSON files.
+- **No human review step** before any downstream use of extracted numbers.
+- **Model IDs will drift again** — `MODEL_CANDIDATES` absorbs this as long as
+  at least one entry is still valid; if all of them die at once, see the
+  Troubleshooting table above.
+
+---
+
+## Security & data handling
+
+- **Free-tier Gemini usage may be used by Google to improve their models.**
+  Don't run real customer financial documents through this while it's on the
+  free tier — the `sample_data/` images exist so you don't have to.
+- `.env`, `credentials.json`-style files, and anything with real secrets are
+  gitignored — double check before committing if you add new config.
+- The sender allow-list (`ALLOWED_SENDER_EMAIL`) is enforced in Python
+  *before* any data is sent to Gemini — an unauthorized email never leaves
+  this codebase.
