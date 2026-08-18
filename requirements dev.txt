@@ -1,0 +1,8 @@
+# Only needed to run scripts/generate_sample_statements.py — the core
+# pipeline (main.py) does NOT need this file at all.
+#
+# Note: Pillow ships compiled C extensions. If your machine's Application
+# Control / WDAC policy blocks compiled binaries (see README), this may hit
+# the same wall the google-genai SDK did. In that case, skip this file
+# entirely and just use the pre-generated images already in sample_data/.
+Pillow
