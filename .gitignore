@@ -4,3 +4,4 @@ __pycache__/
 .env
 output/*.json
 !output/.gitkeep
+test.py
