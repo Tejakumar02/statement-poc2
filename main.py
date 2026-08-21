@@ -56,6 +56,7 @@ def main():
             raw = extract_statements(
                 sender=msg.get("From"),
                 received_date=msg.get("Date"),
+                subject=subject,
                 body_text=body_text,
                 images=images,
             )

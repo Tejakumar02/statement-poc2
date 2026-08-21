@@ -51,7 +51,7 @@ def _endpoint_for(model):
     return f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
-def extract_statements(sender, received_date, body_text, images):
+def extract_statements(sender, received_date, subject, body_text, images):
     """
     images: list of {"mime_type": str, "bytes": bytes}
     Returns the raw JSON text from Gemini (caller is responsible for
@@ -77,6 +77,7 @@ def extract_statements(sender, received_date, body_text, images):
         {"text": auth_override},
         {"text": f"Sender: {sender}"},
         {"text": f"Email Date: {received_date}"},
+        {"text": f"Subject: {subject}"},
         {"text": body_text},
     ]
     for img in images:
