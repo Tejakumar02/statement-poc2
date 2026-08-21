@@ -24,6 +24,7 @@ The input may contain:
 
 - Email sender
 - Email received date
+- Email subject
 - Plain text
 - HTML text
 - Multiple embedded images
@@ -254,6 +255,7 @@ Schema
   "processed": true,
   "email_sender": "",
   "email_received_date": "",
+  "email_subject": "",
   "statements": [
     {
       "statement_id": 1,
